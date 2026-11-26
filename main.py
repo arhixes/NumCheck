@@ -1,4 +1,3 @@
-import json
 import os
 import time
 import uuid
@@ -9,14 +8,13 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # GigaChat
-AUTH_KEY = os.environ["GIGACHAT_AUTH_KEY"]
+AUTH_KEY = os.environ["GIGACHAT_AUTH_KEY"] 
 SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-MODEL = os.getenv("LLM_MODEL", "GigaChat-2")
-BASE_URL = os.getenv("LLM_BASE_URL", "https://gigachat.devices.sberbank.ru/api/v1")
+MODEL = os.getenv("LLM_MODEL", "GigaChat-2-Max")
+BASE_URL = os.getenv("LLM_BASE_URL", "https://api.giga.chat/v1")
 OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 CA_BUNDLE = os.getenv("GIGACHAT_CA_BUNDLE")
 VERIFY = CA_BUNDLE if CA_BUNDLE else False
-
 http_client = httpx.Client(verify=VERIFY, timeout=60)
 _token = {"value": None, "expires_at": 0.0}
 
@@ -27,9 +25,8 @@ SYSTEM_PROMPT = (
 )
 
 app = FastAPI(title="Financial Analyst with Number Verification")
-
-
 def get_token() -> str:
+    """Access token GigaChat живёт ~30 минут, поэтому обновляем его по необходимости."""
     if _token["value"] and time.time() < _token["expires_at"] - 60:
         return _token["value"]
     r = http_client.post(
@@ -70,6 +67,7 @@ class AnalysisResult(BaseModel):
 
 
 def inline_refs(schema: dict) -> dict:
+    """Разворачивает $defs/$ref, чтобы схема была плоской."""
     defs = schema.pop("$defs", {})
 
     def walk(node):
@@ -84,9 +82,18 @@ def inline_refs(schema: dict) -> dict:
     return walk(schema)
 
 
-SCHEMA = inline_refs(AnalysisResult.model_json_schema())
+def strip_keys(node, keys):
+    if isinstance(node, dict):
+        return {k: strip_keys(v, keys) for k, v in node.items() if k not in keys}
+    if isinstance(node, list):
+        return [strip_keys(i, keys) for i in node]
+    return node
 
-# эндпоинт
+
+SCHEMA = strip_keys(inline_refs(AnalysisResult.model_json_schema()), {"title", "additionalProperties"})
+
+
+# Эндпоинт
 @app.post("/analyze", response_model=AnalysisResult)
 def analyze(req: AnalyzeRequest) -> AnalysisResult:
     try:
@@ -101,7 +108,7 @@ def analyze(req: AnalyzeRequest) -> AnalysisResult:
             model=MODEL,
             temperature=req.temperature,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT + "\nСхема ответа (JSON Schema):\n" + json.dumps(SCHEMA, ensure_ascii=False)},
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": req.text},
             ],
             response_format={"type": "json_schema", "schema": SCHEMA, "strict": True},
